@@ -10,7 +10,6 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 import yaml
-from dotenv import load_dotenv
 
 from mt5_connector import MT5Connector
 from risk_manager import RiskManager
@@ -32,9 +31,6 @@ class TradingBot:
         Args:
             config_file: Path to configuration file
         """
-        # Load environment variables
-        load_dotenv()
-
         # Load configuration
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
@@ -53,10 +49,10 @@ class TradingBot:
         self.is_tango_strategy = False
 
         # Trading parameters
-        self.symbol = os.getenv('SYMBOL', self.config['trading']['symbol'])
-        self.timeframe = os.getenv('TIMEFRAME', self.config['trading']['timeframe'])
-        self.lot_size = float(os.getenv('LOT_SIZE', self.config['trading']['lot_size']))
-        self.magic_number = int(os.getenv('MAGIC_NUMBER', self.config['trading']['magic_number']))
+        self.symbol = self.config['trading']['symbol']
+        self.timeframe = self.config['trading']['timeframe']
+        self.lot_size = self.config['trading']['lot_size']
+        self.magic_number = self.config['trading']['magic_number']
 
         # Bot state
         self.last_bar_time = None
@@ -71,14 +67,15 @@ class TradingBot:
         Returns:
             bool: True if connection successful
         """
-        # Get MT5 credentials from environment
-        login = int(os.getenv('MT5_LOGIN', 0))
-        password = os.getenv('MT5_PASSWORD', '')
-        server = os.getenv('MT5_SERVER', '')
+        # Get MT5 credentials from config
+        mt5_config = self.config.get('mt5', {})
+        login = mt5_config.get('login', 0)
+        password = mt5_config.get('password', '')
+        server = mt5_config.get('server', '')
 
         if not all([login, password, server]):
-            self.logger.error("MT5 credentials not found in environment variables")
-            self.logger.error("Please create a .env file with MT5_LOGIN, MT5_PASSWORD, and MT5_SERVER")
+            self.logger.error("MT5 credentials not found in config.yaml")
+            self.logger.error("Please configure mt5 section in config.yaml with login, password, and server")
             return False
 
         # Initialize MT5 connector

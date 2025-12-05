@@ -1,7 +1,7 @@
 mt5:
   login: 12345678              # Your MT5 account number
   password: "your_password"    # Your MT5 password
-  server: "your_broker_server" # Your broker's server name
+  server: "your_broker_server" # Your broker's server name (e.g., "MetaQuotes-Demo")
 
 trading:
   symbol: "XAUUSD"

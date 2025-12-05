@@ -30,9 +30,20 @@ The Tango strategy is a P&L-based hedging strategy that automatically manages po
 
 ## Configuration
 
-The Tango strategy is configured in `config.yaml`:
+All configuration is in `config.yaml`:
 
 ```yaml
+mt5:
+  login: 12345678              # Your MT5 account number
+  password: "your_password"    # Your MT5 password
+  server: "your_broker_server" # Your broker's server name
+
+trading:
+  symbol: "XAUUSD"
+  timeframe: "M5"
+  lot_size: 0.1
+  magic_number: 123456
+
 strategy:
   type: "tango"
   parameters:
@@ -142,7 +153,7 @@ python tango_control.py close-all
 - Review symbol point_value and contract_size settings
 
 ### Connection issues
-- Verify .env file has correct MT5 credentials
+- Verify config.yaml has correct MT5 credentials in the mt5 section
 - Check MT5 terminal is running
 - Ensure symbol (XAUUSD) is available in your broker
 

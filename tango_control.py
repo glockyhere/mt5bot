@@ -8,7 +8,6 @@ import os
 import sys
 import yaml
 import argparse
-from dotenv import load_dotenv
 
 from mt5_connector import MT5Connector
 from strategies import TangoStrategy
@@ -40,9 +39,7 @@ def main():
         parser.print_help()
         return
 
-    # Load environment and config
-    load_dotenv()
-
+    # Load configuration
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
@@ -50,13 +47,15 @@ def main():
     setup_logging(config['logging'])
     logger = logging.getLogger(__name__)
 
-    # Get MT5 credentials
-    login = int(os.getenv('MT5_LOGIN', 0))
-    password = os.getenv('MT5_PASSWORD', '')
-    server = os.getenv('MT5_SERVER', '')
+    # Get MT5 credentials from config
+    mt5_config = config.get('mt5', {})
+    login = mt5_config.get('login', 0)
+    password = mt5_config.get('password', '')
+    server = mt5_config.get('server', '')
 
     if not all([login, password, server]):
-        logger.error("MT5 credentials not found in .env file")
+        logger.error("MT5 credentials not found in config.yaml")
+        logger.error("Please configure mt5 section in config.yaml")
         return
 
     # Connect to MT5
@@ -69,9 +68,9 @@ def main():
     logger.info("Connected to MT5")
 
     # Get trading parameters
-    symbol = os.getenv('SYMBOL', config['trading']['symbol'])
-    lot_size = float(os.getenv('LOT_SIZE', config['trading']['lot_size']))
-    magic_number = int(os.getenv('MAGIC_NUMBER', config['trading']['magic_number']))
+    symbol = config['trading']['symbol']
+    lot_size = config['trading']['lot_size']
+    magic_number = config['trading']['magic_number']
 
     # Initialize Tango strategy and executor
     strategy_params = config['strategy']['parameters'].copy()
