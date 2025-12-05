@@ -325,3 +325,45 @@ class MT5Connector:
 
         self.logger.info(f"Position {ticket} closed successfully")
         return True
+
+    def modify_position(self, ticket: int, sl: float = 0.0, tp: float = 0.0) -> bool:
+        """
+        Modify stop loss and take profit of an existing position
+
+        Args:
+            ticket: Position ticket number
+            sl: New stop loss price (0 to remove)
+            tp: New take profit price (0 to remove)
+
+        Returns:
+            bool: True if modified successfully
+        """
+        if not self.connected:
+            self.logger.error("Not connected to MT5")
+            return False
+
+        positions = mt5.positions_get(ticket=ticket)
+        if positions is None or len(positions) == 0:
+            self.logger.error(f"Position {ticket} not found")
+            return False
+
+        position = positions[0]
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": position.symbol,
+            "position": ticket,
+            "sl": sl,
+            "tp": tp,
+            "magic": position.magic,
+            "comment": "Modify SL/TP",
+        }
+
+        result = mt5.order_send(request)
+
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            self.logger.error(f"Failed to modify position {ticket}: {result.comment}")
+            return False
+
+        self.logger.info(f"Position {ticket} modified successfully (SL: {sl}, TP: {tp})")
+        return True
