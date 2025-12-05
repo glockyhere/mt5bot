@@ -1,0 +1,30 @@
+trading:
+  symbol: "XAUUSD"
+  timeframe: "M5"
+  lot_size: 0.1
+  magic_number: 123456
+
+risk_management:
+  max_risk_per_trade: 0.02  # 2% of account
+  max_daily_loss: 0.05      # 5% of account
+  max_positions: 3
+  stop_loss_pips: 50
+  take_profit_pips: 100
+  trailing_stop: true
+  trailing_stop_pips: 30
+
+strategy:
+  type: "tango"
+  parameters:
+    loss_trigger: 10.0        # Dollar loss to trigger hedge
+    profit_breakeven: 20.0    # Profit threshold to set breakeven SL
+    profit_trail_step: 20.0   # Trail SL by this amount for each $20 profit
+    max_positions: 3          # Maximum 3 positions (1 losing + 2 profitable)
+    point_value: 0.01         # For XAUUSD (Gold)
+    contract_size: 100        # Standard for XAUUSD
+
+logging:
+  level: "INFO"
+  file: "logs/trading_bot.log"
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
