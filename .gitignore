@@ -1,6 +1,5 @@
-# Environment variables and config with credentials
+# Environment variables
 .env
-config.yaml
 
 # Python
 __pycache__/
