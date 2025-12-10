@@ -7,6 +7,7 @@ Commands: long <slot_size>, short <slot_size>
 import asyncio
 import logging
 import re
+import time
 import yaml
 from typing import Optional
 
@@ -19,6 +20,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import BadRequest
 
 from mt5_connector import MT5Connector
 from logger_config import setup_logging
@@ -61,6 +63,10 @@ class TelegramTradingBot:
 
         # Position tracking for trailing stops
         self.position_tracker = {}
+
+        # Track live position displays for real-time updates
+        # {(chat_id, message_id): {'type': 'positions'|'close', 'last_update': timestamp}}
+        self.live_displays = {}
 
         self.logger.info("Telegram Trading Bot initialized")
 
@@ -117,14 +123,17 @@ class TelegramTradingBot:
             parse_mode='Markdown'
         )
 
-    async def _show_close_menu(self, update: Update):
-        """Show positions as buttons to close"""
+    def _build_close_menu_keyboard(self):
+        """Build close menu keyboard with current positions"""
         positions = self.connector.get_positions(symbol=self.symbol)
         positions = [p for p in positions if p['magic'] == self.magic_number]
 
         if not positions:
-            await update.message.reply_text("📈 No open positions to close")
-            return
+            return None, None
+
+        total_pnl = sum(p['profit'] for p in positions)
+        total_emoji = "🟢" if total_pnl >= 0 else "🔴"
+        total_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
 
         keyboard = []
         for pos in positions:
@@ -136,12 +145,24 @@ class TelegramTradingBot:
         keyboard.append([InlineKeyboardButton("❌ Close All", callback_data="close_all")])
         keyboard.append([InlineKeyboardButton("🔙 Cancel", callback_data="cancel")])
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = f"Select position to close: | {total_emoji} {total_str}"
+        return text, InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(
-            "Select position to close:",
-            reply_markup=reply_markup
-        )
+    async def _show_close_menu(self, update: Update):
+        """Show positions as buttons to close"""
+        text, keyboard = self._build_close_menu_keyboard()
+
+        if not keyboard:
+            await update.message.reply_text("📈 No open positions to close")
+            return
+
+        msg = await update.message.reply_text(text, reply_markup=keyboard)
+
+        # Track for live updates
+        self.live_displays[(msg.chat_id, msg.message_id)] = {
+            'type': 'close',
+            'last_update': time.time()
+        }
 
     def check_position_limits(self, order_type: str) -> tuple[bool, str]:
         """
@@ -240,6 +261,10 @@ class TelegramTradingBot:
         elif query.data == "close_all":
             await self._close_all_positions(query)
         elif query.data == "cancel":
+            # Remove from live tracking
+            key = (query.message.chat_id, query.message.message_id)
+            if key in self.live_displays:
+                del self.live_displays[key]
             await query.edit_message_text("Cancelled")
         elif query.data.startswith("close_"):
             ticket = int(query.data.replace("close_", ""))
@@ -261,23 +286,43 @@ class TelegramTradingBot:
 
         await query.edit_message_text(text, parse_mode='Markdown')
 
-    async def _send_positions(self, query):
-        """Send open positions"""
+    def _build_positions_text(self):
+        """Build positions text"""
         positions = self.connector.get_positions(symbol=self.symbol)
         positions = [p for p in positions if p['magic'] == self.magic_number]
 
         if not positions:
-            text = "📈 No open positions"
-        else:
-            text = "📈 *Open Positions*\n\n"
-            for pos in positions:
-                emoji = "🟢" if pos['profit'] >= 0 else "🔴"
-                text += (
-                    f"{emoji} {pos['type']} {pos['volume']} @ {pos['price_open']:.2f}\n"
-                    f"   P/L: `${pos['profit']:.2f}` | SL: {pos['sl']:.2f}\n\n"
-                )
+            return "📈 No open positions", False
+
+        total_pnl = sum(p['profit'] for p in positions)
+        total_emoji = "🟢" if total_pnl >= 0 else "🔴"
+        total_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
+
+        text = f"📈 *Open Positions* | {total_emoji} {total_str}\n\n"
+        for pos in positions:
+            emoji = "🟢" if pos['profit'] >= 0 else "🔴"
+            pnl_str = f"+${pos['profit']:.2f}" if pos['profit'] >= 0 else f"-${abs(pos['profit']):.2f}"
+            text += (
+                f"{emoji} {pos['type']} {pos['volume']} @ {pos['price_open']:.2f}\n"
+                f"   P/L: `{pnl_str}` | SL: {pos['sl']:.2f}\n\n"
+            )
+
+        return text, True
+
+    async def _send_positions(self, query):
+        """Send open positions"""
+        text, has_positions = self._build_positions_text()
 
         await query.edit_message_text(text, parse_mode='Markdown')
+
+        # Track this display for live updates
+        if has_positions:
+            chat_id = query.message.chat_id
+            message_id = query.message.message_id
+            self.live_displays[(chat_id, message_id)] = {
+                'type': 'positions',
+                'last_update': time.time()
+            }
 
     async def _close_all_positions(self, query):
         """Close all positions"""
@@ -297,6 +342,12 @@ class TelegramTradingBot:
 
         emoji = "🟢" if total_pnl >= 0 else "🔴"
         pnl_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
+
+        # Remove from live tracking
+        key = (query.message.chat_id, query.message.message_id)
+        if key in self.live_displays:
+            del self.live_displays[key]
+
         await query.edit_message_text(f"✅ Closed {closed}/{len(positions)} positions\n{emoji} Total P/L: {pnl_str}")
 
     async def _close_single_position(self, query, ticket: int):
@@ -312,12 +363,74 @@ class TelegramTradingBot:
         if self.connector.close_position(ticket):
             emoji = "🟢" if profit >= 0 else "🔴"
             pnl_str = f"+${profit:.2f}" if profit >= 0 else f"-${abs(profit):.2f}"
+
+            # Remove from live tracking
+            key = (query.message.chat_id, query.message.message_id)
+            if key in self.live_displays:
+                del self.live_displays[key]
+
             await query.edit_message_text(
                 f"✅ Closed {position['type']} {position['volume']} lots\n"
                 f"{emoji} P/L: {pnl_str}"
             )
         else:
             await query.edit_message_text(f"❌ Failed to close position {ticket}")
+
+    async def update_live_displays(self, context: ContextTypes.DEFAULT_TYPE):
+        """Update all live position displays (runs as job)"""
+        if not self.connector or not self.connector.connected:
+            return
+
+        if not self.live_displays:
+            return
+
+        # Remove stale displays (older than 5 minutes)
+        stale_keys = [
+            key for key, data in self.live_displays.items()
+            if time.time() - data['last_update'] > 300
+        ]
+        for key in stale_keys:
+            del self.live_displays[key]
+
+        # Update each tracked display
+        for (chat_id, message_id), data in list(self.live_displays.items()):
+            try:
+                if data['type'] == 'positions':
+                    text, has_positions = self._build_positions_text()
+                    if not has_positions:
+                        # No more positions, remove tracking
+                        del self.live_displays[(chat_id, message_id)]
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        parse_mode='Markdown'
+                    )
+                elif data['type'] == 'close':
+                    text, keyboard = self._build_close_menu_keyboard()
+                    if not keyboard:
+                        # No more positions
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text="📈 No open positions"
+                        )
+                        del self.live_displays[(chat_id, message_id)]
+                    else:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=text,
+                            reply_markup=keyboard
+                        )
+                data['last_update'] = time.time()
+            except BadRequest as e:
+                # Message not modified or deleted
+                if "not modified" not in str(e).lower():
+                    del self.live_displays[(chat_id, message_id)]
+            except Exception:
+                # Remove from tracking on any error
+                del self.live_displays[(chat_id, message_id)]
 
     async def manage_trailing_stops(self, context: ContextTypes.DEFAULT_TYPE):
         """Manage trailing stops for all positions (runs as job)"""
@@ -413,6 +526,13 @@ class TelegramTradingBot:
         # Add job for trailing stop management (every 1 second)
         self.application.job_queue.run_repeating(
             self.manage_trailing_stops,
+            interval=1.0,
+            first=1.0
+        )
+
+        # Add job for live display updates (every 1 second)
+        self.application.job_queue.run_repeating(
+            self.update_live_displays,
             interval=1.0,
             first=1.0
         )
