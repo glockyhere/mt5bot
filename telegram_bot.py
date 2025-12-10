@@ -110,9 +110,9 @@ class TelegramTradingBot:
         await update.message.reply_text(
             "🤖 *MT5 Trading Bot*\n\n"
             "Commands:\n"
-            "`buy` - Open BUY\n"
-            "`sell` - Open SELL\n"
-            "`close` - Close positions\n\n"
+            "`b` - BUY\n"
+            "`s` - SELL\n"
+            "`c` - Close\n\n"
             "Or use the buttons below:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -191,14 +191,14 @@ class TelegramTradingBot:
         self.logger.debug(f"Received message: {message}")
 
         # Parse commands
-        if message == 'close':
+        if message == 'c':
             await self._show_close_menu(update)
             return
 
-        if message not in ('buy', 'sell'):
+        if message not in ('b', 's'):
             return
 
-        order_type = message.upper()
+        order_type = 'BUY' if message == 'b' else 'SELL'
         lot_size = self.config['trading'].get('lot_size', 0.1)
 
         self.logger.info(f"Trade command received: {order_type} {lot_size}")
