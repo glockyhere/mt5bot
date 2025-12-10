@@ -1,5 +1,5 @@
-MetaTrader5==5.0.45
-pandas==2.1.4
-numpy==1.26.2
-pyyaml==6.0.1
-python-telegram-bot==21.7
+MetaTrader5
+pandas
+numpy
+pyyaml
+python-telegram-bot
