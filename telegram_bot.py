@@ -115,8 +115,8 @@ class TelegramTradingBot:
         await update.message.reply_text(
             "🤖 *MT5 Trading Bot*\n\n"
             "Commands:\n"
-            "`long <size>` - Open BUY\n"
-            "`short <size>` - Open SELL\n"
+            "`buy` - Open BUY\n"
+            "`sell` - Open SELL\n"
             "`close` - Close positions\n\n"
             "Or use the buttons below:",
             reply_markup=reply_markup,
@@ -196,23 +196,17 @@ class TelegramTradingBot:
         self.logger.debug(f"Received message: {message}")
 
         # Parse commands
-        # close - show positions to close
         if message == 'close':
             await self._show_close_menu(update)
             return
 
-        # long <size> or short <size>
-        match = re.match(r'^(long|short)\s+(\d+\.?\d*)$', message)
-        if not match:
+        if message not in ('buy', 'sell'):
             return
 
-        direction = match.group(1)
-        lot_size = float(match.group(2))
+        order_type = message.upper()
+        lot_size = self.config['trading'].get('lot_size', 0.1)
 
-        self.logger.info(f"Trade command received: {direction} {lot_size}")
-
-        # Execute trade
-        order_type = 'BUY' if direction == 'long' else 'SELL'
+        self.logger.info(f"Trade command received: {order_type} {lot_size}")
 
         # Check position limits
         can_open, reason = self.check_position_limits(order_type)
@@ -226,7 +220,7 @@ class TelegramTradingBot:
             order_type=order_type,
             volume=lot_size,
             magic=self.magic_number,
-            comment=f"TG_{direction}_{lot_size}"
+            comment=f"TG_{order_type}"
         )
 
         if result:

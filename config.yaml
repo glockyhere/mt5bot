@@ -12,6 +12,7 @@ telegram:
 trading:
   symbol: "XAUUSD"
   magic_number: 123456
+  lot_size: 0.1                # Default lot size for buy/sell commands
 
 logging:
   level: "INFO"
