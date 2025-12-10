@@ -25,10 +25,8 @@ from telegram.error import BadRequest
 from mt5_connector import MT5Connector
 from logger_config import setup_logging
 
-# Trailing stop configuration (in dollars)
-# At $10 profit -> SL at $5 | At $20 -> SL at $10 | At $30 -> SL at $20 | etc.
-TRAILING_STOP_TRIGGER = 10.0  # First trigger at $10 profit
-TRAILING_STOP_STEP = 10.0     # Check every $10 increment
+# Take profit in dollars
+TAKE_PROFIT_DOLLARS = 10.0
 
 # Position limits
 MAX_SAME_DIRECTION = 3    # Max 3 positions in same direction
@@ -60,9 +58,6 @@ class TelegramTradingBot:
         self.connector: Optional[MT5Connector] = None
         self.application: Optional[Application] = None
         self.running = False
-
-        # Position tracking for trailing stops
-        self.position_tracker = {}
 
         # Track live position displays for real-time updates
         # {(chat_id, message_id): {'type': 'positions'|'close', 'last_update': timestamp}}
@@ -215,30 +210,29 @@ class TelegramTradingBot:
             await update.message.reply_text(f"⚠️ {reason}")
             return
 
+        # Calculate TP price
+        tp_price = self._calculate_tp_price(order_type, lot_size)
+
         result = self.connector.send_order(
             symbol=self.symbol,
             order_type=order_type,
             volume=lot_size,
+            tp=tp_price,
             magic=self.magic_number,
             comment=f"TG_{order_type}"
         )
 
         if result:
-            self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']}")
-            # Track position for trailing stop
-            self.position_tracker[result['ticket']] = {
-                'entry_price': result['price'],
-                'current_sl_profit': 0,
-                'type': order_type
-            }
+            self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} TP: {tp_price}")
             await update.message.reply_text(
                 f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
+                f"TP: {tp_price:.2f} (${TAKE_PROFIT_DOLLARS})\n"
                 f"Ticket: `{result['ticket']}`",
                 parse_mode='Markdown'
             )
         else:
-            self.logger.error(f"Failed to execute {direction} {lot_size}")
-            await update.message.reply_text(f"❌ Failed to execute {direction} {lot_size}")
+            self.logger.error(f"Failed to execute {order_type} {lot_size}")
+            await update.message.reply_text(f"❌ Failed to execute {order_type} {lot_size}")
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callbacks"""
@@ -298,7 +292,7 @@ class TelegramTradingBot:
             pnl_str = f"+${pos['profit']:.2f}" if pos['profit'] >= 0 else f"-${abs(pos['profit']):.2f}"
             text += (
                 f"{emoji} {pos['type']} {pos['volume']} @ {pos['price_open']:.2f}\n"
-                f"   P/L: `{pnl_str}` | SL: {pos['sl']:.2f}\n\n"
+                f"   P/L: `{pnl_str}` | TP: {pos['tp']:.2f}\n\n"
             )
 
         return text, True
@@ -426,76 +420,23 @@ class TelegramTradingBot:
                 # Remove from tracking on any error
                 del self.live_displays[(chat_id, message_id)]
 
-    async def manage_trailing_stops(self, context: ContextTypes.DEFAULT_TYPE):
-        """Manage trailing stops for all positions (runs as job)"""
-        if not self.connector or not self.connector.connected:
-            return
-
-        positions = self.connector.get_positions(symbol=self.symbol)
-        positions = [p for p in positions if p['magic'] == self.magic_number]
-
-        for pos in positions:
-            ticket = pos['ticket']
-            profit = pos['profit']
-
-            # Initialize tracking if not exists
-            if ticket not in self.position_tracker:
-                self.position_tracker[ticket] = {
-                    'entry_price': pos['price_open'],
-                    'current_sl_profit': 0,
-                    'type': pos['type']
-                }
-
-            tracker = self.position_tracker[ticket]
-
-            # Calculate what SL profit level we should have based on current profit
-            # At $10 -> SL at $5 | At $20 -> SL at $10 | At $30 -> SL at $20
-            if profit >= TRAILING_STOP_TRIGGER:
-                thresholds_crossed = int(profit / TRAILING_STOP_STEP)
-
-                if thresholds_crossed == 1:
-                    target_sl_profit = 5.0
-                else:
-                    target_sl_profit = (thresholds_crossed - 1) * 10.0
-
-                # Only update if we need to move SL higher
-                if target_sl_profit > tracker['current_sl_profit']:
-                    new_sl = self._calculate_stop_price(pos, target_sl_profit)
-
-                    if new_sl > 0:
-                        success = self.connector.modify_position(ticket, sl=new_sl)
-                        if success:
-                            tracker['current_sl_profit'] = target_sl_profit
-                            self.logger.info(
-                                f"Updated SL for ticket {ticket}: "
-                                f"Locking ${target_sl_profit:.0f} profit, Profit: ${profit:.2f}"
-                            )
-
-        # Clean up closed positions from tracker
-        open_tickets = {p['ticket'] for p in positions}
-        closed_tickets = [t for t in self.position_tracker if t not in open_tickets]
-        for t in closed_tickets:
-            del self.position_tracker[t]
-
-    def _calculate_stop_price(self, position: dict, target_profit: float) -> float:
-        """Calculate stop loss price that locks in target_profit dollars"""
-        entry_price = position['price_open']
-        pos_type = position['type']
-
+    def _calculate_tp_price(self, order_type: str, lot_size: float) -> float:
+        """Calculate take profit price for target dollar profit"""
         symbol_info = self.connector.get_symbol_info(self.symbol)
         if not symbol_info:
             return 0.0
 
-        volume = position['volume']
         contract_size = symbol_info.get('trade_contract_size', 100)
+        current_price = symbol_info['ask'] if order_type == 'BUY' else symbol_info['bid']
 
-        price_per_dollar = 1.0 / (volume * contract_size)
-        price_distance = target_profit * price_per_dollar
+        # Price movement per dollar = 1 / (volume * contract_size)
+        price_per_dollar = 1.0 / (lot_size * contract_size)
+        price_distance = TAKE_PROFIT_DOLLARS * price_per_dollar
 
-        if pos_type == 'BUY':
-            return entry_price + price_distance
+        if order_type == 'BUY':
+            return current_price + price_distance
         else:
-            return entry_price - price_distance
+            return current_price - price_distance
 
     def run(self):
         """Start the bot"""
@@ -516,13 +457,6 @@ class TelegramTradingBot:
             self.handle_message
         ))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
-
-        # Add job for trailing stop management (every 1 second)
-        self.application.job_queue.run_repeating(
-            self.manage_trailing_stops,
-            interval=1.0,
-            first=1.0
-        )
 
         # Add job for live display updates (every 1 second)
         self.application.job_queue.run_repeating(
