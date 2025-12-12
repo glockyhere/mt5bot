@@ -214,7 +214,7 @@ class TelegramTradingBot:
             return
 
         # Calculate TP price (if not no_tp mode)
-        tp_price = None if no_tp else self._calculate_tp_price(order_type, lot_size)
+        tp_price = 0.0 if no_tp else self._calculate_tp_price(order_type, lot_size)
 
         result = self.connector.send_order(
             symbol=self.symbol,
