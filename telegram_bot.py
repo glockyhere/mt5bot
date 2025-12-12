@@ -110,8 +110,10 @@ class TelegramTradingBot:
         await update.message.reply_text(
             "🤖 *MT5 Trading Bot*\n\n"
             "Commands:\n"
-            "`b` - BUY\n"
-            "`s` - SELL\n"
+            "`b` - BUY (with TP)\n"
+            "`s` - SELL (with TP)\n"
+            "`bx` - BUY (no TP)\n"
+            "`sx` - SELL (no TP)\n"
             "`c` - Close\n\n"
             "Or use the buttons below:",
             reply_markup=reply_markup,
@@ -195,13 +197,14 @@ class TelegramTradingBot:
             await self._show_close_menu(update)
             return
 
-        if message not in ('b', 's'):
+        if message not in ('b', 's', 'bx', 'sx'):
             return
 
-        order_type = 'BUY' if message == 'b' else 'SELL'
+        order_type = 'BUY' if message in ('b', 'bx') else 'SELL'
+        no_tp = message in ('bx', 'sx')
         lot_size = self.config['trading'].get('lot_size', 0.1)
 
-        self.logger.info(f"Trade command received: {order_type} {lot_size}")
+        self.logger.info(f"Trade command received: {order_type} {lot_size} (no_tp={no_tp})")
 
         # Check position limits
         can_open, reason = self.check_position_limits(order_type)
@@ -210,8 +213,8 @@ class TelegramTradingBot:
             await update.message.reply_text(f"⚠️ {reason}")
             return
 
-        # Calculate TP price
-        tp_price = self._calculate_tp_price(order_type, lot_size)
+        # Calculate TP price (if not no_tp mode)
+        tp_price = None if no_tp else self._calculate_tp_price(order_type, lot_size)
 
         result = self.connector.send_order(
             symbol=self.symbol,
@@ -223,13 +226,21 @@ class TelegramTradingBot:
         )
 
         if result:
-            self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} TP: {tp_price}")
-            await update.message.reply_text(
-                f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
-                f"TP: {tp_price:.2f} (${TAKE_PROFIT_DOLLARS})\n"
-                f"Ticket: `{result['ticket']}`",
-                parse_mode='Markdown'
-            )
+            if no_tp:
+                self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} (no TP)")
+                await update.message.reply_text(
+                    f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
+                    f"Ticket: `{result['ticket']}`",
+                    parse_mode='Markdown'
+                )
+            else:
+                self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} TP: {tp_price}")
+                await update.message.reply_text(
+                    f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
+                    f"TP: {tp_price:.2f} (${TAKE_PROFIT_DOLLARS})\n"
+                    f"Ticket: `{result['ticket']}`",
+                    parse_mode='Markdown'
+                )
         else:
             self.logger.error(f"Failed to execute {order_type} {lot_size}")
             await update.message.reply_text(f"❌ Failed to execute {order_type} {lot_size}")
