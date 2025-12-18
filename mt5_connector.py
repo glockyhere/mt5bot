@@ -165,14 +165,14 @@ class MT5Connector:
         """Get the appropriate filling mode for a symbol"""
         symbol_info = mt5.symbol_info(symbol)
         if symbol_info is None:
-            return mt5.ORDER_FILLING_IOC
+            return mt5.ORDER_FILLING_FOK
 
         filling_mode = symbol_info.filling_mode
 
-        # Check supported modes (filling_mode is a bitmask)
-        if filling_mode & mt5.SYMBOL_FILLING_FOK:
+        # filling_mode is a bitmask: bit 0 = FOK, bit 1 = IOC
+        if filling_mode & 1:  # FOK supported
             return mt5.ORDER_FILLING_FOK
-        elif filling_mode & mt5.SYMBOL_FILLING_IOC:
+        elif filling_mode & 2:  # IOC supported
             return mt5.ORDER_FILLING_IOC
         else:
             return mt5.ORDER_FILLING_RETURN
