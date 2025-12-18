@@ -28,6 +28,11 @@ from logger_config import setup_logging
 # Take profit in dollars
 TAKE_PROFIT_DOLLARS = 10.0
 
+# Trailing stop for no-TP positions (bx/sx)
+TRAILING_ACTIVATE_PNL = 20.0   # Activate trailing stop at $20 PnL
+TRAILING_INITIAL_LOCK = 5.0    # Lock $5 profit at first threshold
+TRAILING_STEP = 20.0           # After first threshold, step every $20
+
 # Position limits
 MAX_SAME_DIRECTION = 3    # Max 3 positions in same direction
 MAX_TOTAL_POSITIONS = 5   # Max 5 total positions
@@ -62,6 +67,10 @@ class TelegramTradingBot:
         # Track live position displays for real-time updates
         # {(chat_id, message_id): {'type': 'positions'|'close', 'last_update': timestamp}}
         self.live_displays = {}
+
+        # Track no-TP positions for trailing stop management
+        # {ticket: {'locked_profit': float}} - tracks the current locked profit level
+        self.no_tp_positions = {}
 
         self.logger.info("Telegram Trading Bot initialized")
 
@@ -112,8 +121,8 @@ class TelegramTradingBot:
             "Commands:\n"
             "`b` - BUY (with TP)\n"
             "`s` - SELL (with TP)\n"
-            "`bx` - BUY (no TP)\n"
-            "`sx` - SELL (no TP)\n"
+            "`bx` - BUY (trailing stop)\n"
+            "`sx` - SELL (trailing stop)\n"
             "`c` - Close\n\n"
             "Or use the buttons below:",
             reply_markup=reply_markup,
@@ -227,10 +236,13 @@ class TelegramTradingBot:
 
         if result:
             if no_tp:
-                self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} (no TP)")
+                # Track for trailing stop management
+                self.no_tp_positions[result['ticket']] = {'locked_profit': 0.0}
+                self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} (no TP, trailing stop enabled)")
                 await update.message.reply_text(
                     f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
-                    f"Ticket: `{result['ticket']}`",
+                    f"Ticket: `{result['ticket']}`\n"
+                    f"Trailing: ${TRAILING_ACTIVATE_PNL} → lock ${TRAILING_INITIAL_LOCK}",
                     parse_mode='Markdown'
                 )
             else:
@@ -449,6 +461,85 @@ class TelegramTradingBot:
         else:
             return current_price - price_distance
 
+    def _calculate_sl_price_for_profit(self, position: dict, target_profit: float) -> float:
+        """Calculate stop loss price that locks in a specific dollar profit"""
+        symbol_info = self.connector.get_symbol_info(self.symbol)
+        if not symbol_info:
+            return 0.0
+
+        contract_size = symbol_info.get('trade_contract_size', 100)
+        price_per_dollar = 1.0 / (position['volume'] * contract_size)
+        price_distance = target_profit * price_per_dollar
+
+        if position['type'] == 'BUY':
+            # For BUY, SL is below open price + profit distance
+            return position['price_open'] + price_distance
+        else:
+            # For SELL, SL is above open price - profit distance
+            return position['price_open'] - price_distance
+
+    def _calculate_trailing_stop_profit(self, current_pnl: float) -> float:
+        """
+        Calculate the profit level to lock based on current PnL.
+
+        Thresholds:
+        - $20 PnL → lock $5
+        - $40 PnL → lock $20
+        - $60 PnL → lock $40
+        - Pattern: after first threshold, lock (PnL - $20)
+        """
+        if current_pnl < TRAILING_ACTIVATE_PNL:
+            return 0.0  # Not activated yet
+
+        if current_pnl < TRAILING_ACTIVATE_PNL + TRAILING_STEP:
+            # First threshold ($20-$39.99): lock $5
+            return TRAILING_INITIAL_LOCK
+
+        # Beyond first threshold: lock at $20 below current threshold
+        # $40 → $20, $60 → $40, $80 → $60, etc.
+        thresholds_passed = int(current_pnl / TRAILING_STEP)
+        return (thresholds_passed - 1) * TRAILING_STEP
+
+    async def monitor_trailing_stops(self, context: ContextTypes.DEFAULT_TYPE):
+        """Monitor no-TP positions and adjust trailing stops based on PnL"""
+        if not self.connector or not self.connector.connected:
+            return
+
+        if not self.no_tp_positions:
+            return
+
+        positions = self.connector.get_positions(symbol=self.symbol)
+        positions = [p for p in positions if p['magic'] == self.magic_number]
+        open_tickets = {p['ticket'] for p in positions}
+
+        # Clean up closed positions from tracking
+        closed_tickets = [t for t in self.no_tp_positions if t not in open_tickets]
+        for ticket in closed_tickets:
+            del self.no_tp_positions[ticket]
+
+        # Check each tracked no-TP position
+        for position in positions:
+            ticket = position['ticket']
+            if ticket not in self.no_tp_positions:
+                continue
+
+            current_pnl = position['profit']
+            current_locked = self.no_tp_positions[ticket]['locked_profit']
+
+            # Calculate what profit should be locked at current PnL
+            target_locked = self._calculate_trailing_stop_profit(current_pnl)
+
+            # Only update if we need to lock MORE profit (never reduce)
+            if target_locked > current_locked:
+                sl_price = self._calculate_sl_price_for_profit(position, target_locked)
+
+                if self.connector.modify_position(ticket, sl=sl_price, tp=0.0):
+                    self.no_tp_positions[ticket]['locked_profit'] = target_locked
+                    self.logger.info(
+                        f"Trailing stop updated: ticket {ticket}, "
+                        f"PnL ${current_pnl:.2f} → locked ${target_locked:.2f}, SL @ {sl_price:.2f}"
+                    )
+
     def run(self):
         """Start the bot"""
         if not self.bot_token:
@@ -472,6 +563,13 @@ class TelegramTradingBot:
         # Add job for live display updates (every 1 second)
         self.application.job_queue.run_repeating(
             self.update_live_displays,
+            interval=1.0,
+            first=1.0
+        )
+
+        # Add job for trailing stop monitoring (every 1 second)
+        self.application.job_queue.run_repeating(
+            self.monitor_trailing_stops,
             interval=1.0,
             first=1.0
         )
