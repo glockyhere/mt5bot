@@ -157,8 +157,25 @@ class MT5Connector:
             'volume_min': symbol_info.volume_min,
             'volume_max': symbol_info.volume_max,
             'volume_step': symbol_info.volume_step,
-            'trade_contract_size': symbol_info.trade_contract_size
+            'trade_contract_size': symbol_info.trade_contract_size,
+            'filling_mode': symbol_info.filling_mode
         }
+
+    def _get_filling_mode(self, symbol: str) -> int:
+        """Get the appropriate filling mode for a symbol"""
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            return mt5.ORDER_FILLING_IOC
+
+        filling_mode = symbol_info.filling_mode
+
+        # Check supported modes (filling_mode is a bitmask)
+        if filling_mode & mt5.SYMBOL_FILLING_FOK:
+            return mt5.ORDER_FILLING_FOK
+        elif filling_mode & mt5.SYMBOL_FILLING_IOC:
+            return mt5.ORDER_FILLING_IOC
+        else:
+            return mt5.ORDER_FILLING_RETURN
 
     def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
         """
@@ -254,7 +271,7 @@ class MT5Connector:
             "magic": magic,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._get_filling_mode(symbol),
         }
 
         # Send order
@@ -318,7 +335,7 @@ class MT5Connector:
             "magic": position.magic,
             "comment": "Close position",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._get_filling_mode(position.symbol),
         }
 
         result = mt5.order_send(request)
