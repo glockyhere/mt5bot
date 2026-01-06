@@ -1,12 +1,22 @@
 """
 Telegram Trading Bot
 Monitors a Telegram group for trading commands and executes trades on MT5
-Commands: long <slot_size>, short <slot_size>
+
+Commands:
+  b - BUY with trailing stop
+  s - SELL with trailing stop
+  c - Close menu
+
+Trailing Stop Strategy:
+  - Initial SL: -$10
+  - At $10 PnL → SL at $2
+  - At $20 PnL → SL at $10
+  - At $30 PnL → SL at $20
+  - ...and so on
 """
 
 import asyncio
 import logging
-import re
 import time
 import yaml
 from typing import Optional
@@ -25,18 +35,23 @@ from telegram.error import BadRequest
 from mt5_connector import MT5Connector
 from logger_config import setup_logging
 
-# Take profit in dollars
-TAKE_PROFIT_DOLLARS = 10.0
+# Trailing Stop Configuration
+INITIAL_SL_DOLLARS = -10.0  # Initial stop loss at -$10
 
-# bb/ss mode: TP=$20, at $15 PnL set SL at $10
-BB_TP = 20.0
-BB_SL_TRIGGER = 15.0
-BB_SL_LOCK = 10.0
-
-# bbb/sss mode: TP=$30, at $25 PnL set SL at $20
-BBB_TP = 30.0
-BBB_SL_TRIGGER = 25.0
-BBB_SL_LOCK = 20.0
+# Trailing stop levels: (trigger_pnl, sl_lock_profit)
+# At $10 PnL → SL at $2, At $20 → SL at $10, At $30 → SL at $20, etc.
+TRAILING_STOP_LEVELS = [
+    (10.0, 2.0),    # At $10 PnL, lock $2 profit
+    (20.0, 10.0),   # At $20 PnL, lock $10 profit
+    (30.0, 20.0),   # At $30 PnL, lock $20 profit
+    (40.0, 30.0),   # At $40 PnL, lock $30 profit
+    (50.0, 40.0),   # At $50 PnL, lock $40 profit
+    (60.0, 50.0),   # At $60 PnL, lock $50 profit
+    (70.0, 60.0),   # At $70 PnL, lock $60 profit
+    (80.0, 70.0),   # At $80 PnL, lock $70 profit
+    (90.0, 80.0),   # At $90 PnL, lock $80 profit
+    (100.0, 90.0),  # At $100 PnL, lock $90 profit
+]
 
 # Position limits
 MAX_SAME_DIRECTION = 3    # Max 3 positions in same direction
@@ -73,8 +88,8 @@ class TelegramTradingBot:
         # {(chat_id, message_id): {'type': 'positions'|'close', 'last_update': timestamp}}
         self.live_displays = {}
 
-        # Track positions for SL monitoring (bb/ss/bbb/sss modes)
-        # {ticket: {'mode': 'bb'|'bbb', 'sl_set': bool}}
+        # Track positions for trailing stop monitoring
+        # {ticket: {'current_level': int}}  # current_level = highest triggered level index (-1 = initial SL)
         self.monitored_positions = {}
 
         self.logger.info("Telegram Trading Bot initialized")
@@ -124,13 +139,15 @@ class TelegramTradingBot:
         await update.message.reply_text(
             "🤖 *MT5 Trading Bot*\n\n"
             "Commands:\n"
-            "`b` - BUY TP $10\n"
-            "`s` - SELL TP $10\n"
-            "`bb` - BUY TP $20, SL $10 @ $15\n"
-            "`ss` - SELL TP $20, SL $10 @ $15\n"
-            "`bbb` - BUY TP $30, SL $20 @ $25\n"
-            "`sss` - SELL TP $30, SL $20 @ $25\n"
-            "`c` - Close\n\n"
+            "`b` - BUY with trailing stop\n"
+            "`s` - SELL with trailing stop\n"
+            "`c` - Close menu\n\n"
+            "Trailing Stop:\n"
+            "• Initial SL: -$10\n"
+            "• At $10 → SL $2\n"
+            "• At $20 → SL $10\n"
+            "• At $30 → SL $20\n"
+            "• ...and so on\n\n"
             "Or use the buttons below:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -213,19 +230,13 @@ class TelegramTradingBot:
             await self._show_close_menu(update)
             return
 
-        if message not in ('b', 's', 'bb', 'ss', 'bbb', 'sss'):
+        if message not in ('b', 's'):
             return
 
-        # Determine order type and mode
-        order_type = 'BUY' if message in ('b', 'bb', 'bbb') else 'SELL'
-        mode = None  # None = simple b/s with $10 TP
-        if message in ('bb', 'ss'):
-            mode = 'bb'
-        elif message in ('bbb', 'sss'):
-            mode = 'bbb'
-
+        # Determine order type
+        order_type = 'BUY' if message == 'b' else 'SELL'
         lot_size = self.config['trading'].get('lot_size', 0.1)
-        self.logger.info(f"Trade command received: {order_type} {lot_size} (mode={mode})")
+        self.logger.info(f"Trade command received: {order_type} {lot_size}")
 
         # Check position limits
         can_open, reason = self.check_position_limits(order_type)
@@ -234,53 +245,29 @@ class TelegramTradingBot:
             await update.message.reply_text(f"⚠️ {reason}")
             return
 
-        # Calculate TP price based on mode
-        if mode == 'bb':
-            tp_price = self._calculate_price_for_profit(order_type, lot_size, BB_TP)
-        elif mode == 'bbb':
-            tp_price = self._calculate_price_for_profit(order_type, lot_size, BBB_TP)
-        else:
-            tp_price = self._calculate_price_for_profit(order_type, lot_size, TAKE_PROFIT_DOLLARS)
+        # Calculate initial SL price at -$10
+        sl_price = self._calculate_price_for_profit(order_type, lot_size, INITIAL_SL_DOLLARS)
 
         result = self.connector.send_order(
             symbol=self.symbol,
             order_type=order_type,
             volume=lot_size,
-            tp=tp_price,
+            sl=sl_price,
             magic=self.magic_number,
             comment=f"TG_{order_type}"
         )
 
         if result:
-            if mode:
-                # Track for SL monitoring
-                self.monitored_positions[result['ticket']] = {'mode': mode, 'sl_set': False}
-                if mode == 'bb':
-                    self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} TP: ${BB_TP}, SL ${BB_SL_LOCK} @ ${BB_SL_TRIGGER}")
-                    await update.message.reply_text(
-                        f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
-                        f"TP: {tp_price:.2f} (${BB_TP})\n"
-                        f"SL: ${BB_SL_LOCK} when PnL hits ${BB_SL_TRIGGER}\n"
-                        f"Ticket: `{result['ticket']}`",
-                        parse_mode='Markdown'
-                    )
-                else:  # bbb
-                    self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} TP: ${BBB_TP}, SL ${BBB_SL_LOCK} @ ${BBB_SL_TRIGGER}")
-                    await update.message.reply_text(
-                        f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
-                        f"TP: {tp_price:.2f} (${BBB_TP})\n"
-                        f"SL: ${BBB_SL_LOCK} when PnL hits ${BBB_SL_TRIGGER}\n"
-                        f"Ticket: `{result['ticket']}`",
-                        parse_mode='Markdown'
-                    )
-            else:
-                self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} TP: {tp_price}")
-                await update.message.reply_text(
-                    f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
-                    f"TP: {tp_price:.2f} (${TAKE_PROFIT_DOLLARS})\n"
-                    f"Ticket: `{result['ticket']}`",
-                    parse_mode='Markdown'
-                )
+            # Track for trailing stop monitoring (start at level -1 = initial SL)
+            self.monitored_positions[result['ticket']] = {'current_level': -1}
+            self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} SL: {sl_price:.2f} (-$10)")
+            await update.message.reply_text(
+                f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
+                f"SL: {sl_price:.2f} (-$10)\n"
+                f"Trailing: $10→$2, $20→$10, $30→$20...\n"
+                f"Ticket: `{result['ticket']}`",
+                parse_mode='Markdown'
+            )
         else:
             self.logger.error(f"Failed to execute {order_type} {lot_size}")
             await update.message.reply_text(f"❌ Failed to execute {order_type} {lot_size}")
@@ -341,9 +328,10 @@ class TelegramTradingBot:
         for pos in positions:
             emoji = "🟢" if pos['profit'] >= 0 else "🔴"
             pnl_str = f"+${pos['profit']:.2f}" if pos['profit'] >= 0 else f"-${abs(pos['profit']):.2f}"
+            sl_str = f"{pos['sl']:.2f}" if pos['sl'] > 0 else "None"
             text += (
                 f"{emoji} {pos['type']} {pos['volume']} @ {pos['price_open']:.2f}\n"
-                f"   P/L: `{pnl_str}` | TP: {pos['tp']:.2f}\n\n"
+                f"   P/L: `{pnl_str}` | SL: {sl_str}\n\n"
             )
 
         return text, True
@@ -506,12 +494,9 @@ class TelegramTradingBot:
             # For SELL, SL is below open price by profit distance
             return position['price_open'] - price_distance
 
-    async def monitor_sl_triggers(self, context: ContextTypes.DEFAULT_TYPE):
-        """Monitor bb/bbb positions and set SL when PnL trigger is reached"""
+    async def monitor_trailing_stops(self, context: ContextTypes.DEFAULT_TYPE):
+        """Monitor positions and update trailing stop when PnL thresholds are crossed"""
         if not self.connector or not self.connector.connected:
-            return
-
-        if not self.monitored_positions:
             return
 
         positions = self.connector.get_positions(symbol=self.symbol)
@@ -523,33 +508,34 @@ class TelegramTradingBot:
         for ticket in closed_tickets:
             del self.monitored_positions[ticket]
 
-        # Check each tracked position
+        # Check each position
         for position in positions:
             ticket = position['ticket']
+
+            # Auto-track untracked positions (in case bot restarted)
             if ticket not in self.monitored_positions:
-                continue
+                self.monitored_positions[ticket] = {'current_level': -1}
 
             tracking = self.monitored_positions[ticket]
-            if tracking['sl_set']:
-                continue  # SL already set for this position
-
+            current_level = tracking['current_level']
             current_pnl = position['profit']
-            mode = tracking['mode']
 
-            # Check if PnL has hit the trigger
-            if mode == 'bb' and current_pnl >= BB_SL_TRIGGER:
-                sl_price = self._calculate_sl_price_for_profit(position, BB_SL_LOCK)
-                if self.connector.modify_position(ticket, sl=sl_price, tp=position['tp']):
-                    tracking['sl_set'] = True
+            # Find the highest level triggered by current PnL
+            new_level = current_level
+            for i, (trigger_pnl, _) in enumerate(TRAILING_STOP_LEVELS):
+                if current_pnl >= trigger_pnl and i > current_level:
+                    new_level = i
+
+            # If we've crossed a new level, update the SL
+            if new_level > current_level:
+                _, sl_lock_profit = TRAILING_STOP_LEVELS[new_level]
+                sl_price = self._calculate_sl_price_for_profit(position, sl_lock_profit)
+
+                if self.connector.modify_position(ticket, sl=sl_price):
+                    tracking['current_level'] = new_level
+                    trigger_pnl, _ = TRAILING_STOP_LEVELS[new_level]
                     self.logger.info(
-                        f"SL set: ticket {ticket}, PnL ${current_pnl:.2f} hit ${BB_SL_TRIGGER} → SL @ {sl_price:.2f} (${BB_SL_LOCK})"
-                    )
-            elif mode == 'bbb' and current_pnl >= BBB_SL_TRIGGER:
-                sl_price = self._calculate_sl_price_for_profit(position, BBB_SL_LOCK)
-                if self.connector.modify_position(ticket, sl=sl_price, tp=position['tp']):
-                    tracking['sl_set'] = True
-                    self.logger.info(
-                        f"SL set: ticket {ticket}, PnL ${current_pnl:.2f} hit ${BBB_SL_TRIGGER} → SL @ {sl_price:.2f} (${BBB_SL_LOCK})"
+                        f"Trailing SL: ticket {ticket}, PnL ${current_pnl:.2f} hit ${trigger_pnl} → SL @ {sl_price:.2f} (${sl_lock_profit})"
                     )
 
     def run(self):
@@ -579,9 +565,9 @@ class TelegramTradingBot:
             first=1.0
         )
 
-        # Add job for SL trigger monitoring (every 1 second)
+        # Add job for trailing stop monitoring (every 1 second)
         self.application.job_queue.run_repeating(
-            self.monitor_sl_triggers,
+            self.monitor_trailing_stops,
             interval=1.0,
             first=1.0
         )
