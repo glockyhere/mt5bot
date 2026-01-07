@@ -8,7 +8,7 @@ Commands:
   c - Close menu
 
 Trailing Stop Strategy:
-  - Initial SL: -$25
+  - Initial SL: -$35
   - At $20 PnL → SL at $5
   - At $40 PnL → SL at $20
   - At $60 PnL → SL at $40
@@ -36,7 +36,7 @@ from mt5_connector import MT5Connector
 from logger_config import setup_logging
 
 # Trailing Stop Configuration
-INITIAL_SL_DOLLARS = -25.0  # Initial stop loss at -$25
+INITIAL_SL_DOLLARS = -35.0  # Initial stop loss at -$35
 
 # Trailing stop levels: (trigger_pnl, sl_lock_profit)
 # At $20 PnL → SL at $5, At $40 → SL at $20, At $60 → SL at $40, etc.
@@ -143,7 +143,7 @@ class TelegramTradingBot:
             "`s` - SELL with trailing stop\n"
             "`c` - Close menu\n\n"
             "Trailing Stop:\n"
-            "• Initial SL: -$25\n"
+            "• Initial SL: -$35\n"
             "• At $20 → SL $5\n"
             "• At $40 → SL $20\n"
             "• At $60 → SL $40\n"
@@ -260,10 +260,10 @@ class TelegramTradingBot:
         if result:
             # Track for trailing stop monitoring (start at level -1 = initial SL)
             self.monitored_positions[result['ticket']] = {'current_level': -1}
-            self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} SL: {sl_price:.2f} (-$25)")
+            self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} SL: {sl_price:.2f} (-$35)")
             await update.message.reply_text(
                 f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
-                f"SL: {sl_price:.2f} (-$25)\n"
+                f"SL: {sl_price:.2f} (-$35)\n"
                 f"Trailing: $20→$5, $40→$20, $60→$40...\n"
                 f"Ticket: `{result['ticket']}`",
                 parse_mode='Markdown'
