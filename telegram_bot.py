@@ -9,9 +9,9 @@ Commands:
 
 Trailing Stop Strategy:
   - Initial SL: -$25
-  - At $10 PnL → SL at $2
-  - At $20 PnL → SL at $10
-  - At $30 PnL → SL at $20
+  - At $20 PnL → SL at $5
+  - At $40 PnL → SL at $20
+  - At $60 PnL → SL at $40
   - ...and so on
 """
 
@@ -39,18 +39,18 @@ from logger_config import setup_logging
 INITIAL_SL_DOLLARS = -25.0  # Initial stop loss at -$25
 
 # Trailing stop levels: (trigger_pnl, sl_lock_profit)
-# At $10 PnL → SL at $2, At $20 → SL at $10, At $30 → SL at $20, etc.
+# At $20 PnL → SL at $5, At $40 → SL at $20, At $60 → SL at $40, etc.
 TRAILING_STOP_LEVELS = [
-    (10.0, 2.0),    # At $10 PnL, lock $2 profit
-    (20.0, 10.0),   # At $20 PnL, lock $10 profit
-    (30.0, 20.0),   # At $30 PnL, lock $20 profit
-    (40.0, 30.0),   # At $40 PnL, lock $30 profit
-    (50.0, 40.0),   # At $50 PnL, lock $40 profit
-    (60.0, 50.0),   # At $60 PnL, lock $50 profit
-    (70.0, 60.0),   # At $70 PnL, lock $60 profit
-    (80.0, 70.0),   # At $80 PnL, lock $70 profit
-    (90.0, 80.0),   # At $90 PnL, lock $80 profit
-    (100.0, 90.0),  # At $100 PnL, lock $90 profit
+    (20.0, 5.0),     # At $20 PnL, lock $5 profit
+    (40.0, 20.0),    # At $40 PnL, lock $20 profit
+    (60.0, 40.0),    # At $60 PnL, lock $40 profit
+    (80.0, 60.0),    # At $80 PnL, lock $60 profit
+    (100.0, 80.0),   # At $100 PnL, lock $80 profit
+    (120.0, 100.0),  # At $120 PnL, lock $100 profit
+    (140.0, 120.0),  # At $140 PnL, lock $120 profit
+    (160.0, 140.0),  # At $160 PnL, lock $140 profit
+    (180.0, 160.0),  # At $180 PnL, lock $160 profit
+    (200.0, 180.0),  # At $200 PnL, lock $180 profit
 ]
 
 # Position limits
@@ -144,9 +144,9 @@ class TelegramTradingBot:
             "`c` - Close menu\n\n"
             "Trailing Stop:\n"
             "• Initial SL: -$25\n"
-            "• At $10 → SL $2\n"
-            "• At $20 → SL $10\n"
-            "• At $30 → SL $20\n"
+            "• At $20 → SL $5\n"
+            "• At $40 → SL $20\n"
+            "• At $60 → SL $40\n"
             "• ...and so on\n\n"
             "Or use the buttons below:",
             reply_markup=reply_markup,
@@ -264,7 +264,7 @@ class TelegramTradingBot:
             await update.message.reply_text(
                 f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
                 f"SL: {sl_price:.2f} (-$25)\n"
-                f"Trailing: $10→$2, $20→$10, $30→$20...\n"
+                f"Trailing: $20→$5, $40→$20, $60→$40...\n"
                 f"Ticket: `{result['ticket']}`",
                 parse_mode='Markdown'
             )
