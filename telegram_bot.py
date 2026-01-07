@@ -5,6 +5,8 @@ Monitors a Telegram group for trading commands and executes trades on MT5
 Commands:
   b - BUY with trailing stop
   s - SELL with trailing stop
+  bx - BUY with TP $10, SL -$10
+  sx - SELL with TP $10, SL -$10
   c - Close menu
 
 Trailing Stop Strategy:
@@ -37,6 +39,10 @@ from logger_config import setup_logging
 
 # Trailing Stop Configuration
 INITIAL_SL_DOLLARS = -35.0  # Initial stop loss at -$35
+
+# bx/sx mode: fixed TP and SL
+BX_TP_DOLLARS = 10.0   # Take profit at $10
+BX_SL_DOLLARS = -10.0  # Stop loss at -$10
 
 # Trailing stop levels: (trigger_pnl, sl_lock_profit)
 # At $20 PnL → SL at $5, At $40 → SL at $20, At $60 → SL at $40, etc.
@@ -141,6 +147,8 @@ class TelegramTradingBot:
             "Commands:\n"
             "`b` - BUY with trailing stop\n"
             "`s` - SELL with trailing stop\n"
+            "`bx` - BUY TP $10, SL -$10\n"
+            "`sx` - SELL TP $10, SL -$10\n"
             "`c` - Close menu\n\n"
             "Trailing Stop:\n"
             "• Initial SL: -$35\n"
@@ -230,13 +238,14 @@ class TelegramTradingBot:
             await self._show_close_menu(update)
             return
 
-        if message not in ('b', 's'):
+        if message not in ('b', 's', 'bx', 'sx'):
             return
 
-        # Determine order type
-        order_type = 'BUY' if message == 'b' else 'SELL'
+        # Determine order type and mode
+        order_type = 'BUY' if message in ('b', 'bx') else 'SELL'
+        is_bx_mode = message in ('bx', 'sx')
         lot_size = self.config['trading'].get('lot_size', 0.1)
-        self.logger.info(f"Trade command received: {order_type} {lot_size}")
+        self.logger.info(f"Trade command received: {order_type} {lot_size} (bx_mode={is_bx_mode})")
 
         # Check position limits
         can_open, reason = self.check_position_limits(order_type)
@@ -245,32 +254,60 @@ class TelegramTradingBot:
             await update.message.reply_text(f"⚠️ {reason}")
             return
 
-        # Calculate initial SL price at -$10
-        sl_price = self._calculate_price_for_profit(order_type, lot_size, INITIAL_SL_DOLLARS)
+        if is_bx_mode:
+            # bx/sx mode: fixed TP $10 and SL -$10
+            tp_price = self._calculate_price_for_profit(order_type, lot_size, BX_TP_DOLLARS)
+            sl_price = self._calculate_price_for_profit(order_type, lot_size, BX_SL_DOLLARS)
 
-        result = self.connector.send_order(
-            symbol=self.symbol,
-            order_type=order_type,
-            volume=lot_size,
-            sl=sl_price,
-            magic=self.magic_number,
-            comment=f"TG_{order_type}"
-        )
-
-        if result:
-            # Track for trailing stop monitoring (start at level -1 = initial SL)
-            self.monitored_positions[result['ticket']] = {'current_level': -1}
-            self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} SL: {sl_price:.2f} (-$35)")
-            await update.message.reply_text(
-                f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
-                f"SL: {sl_price:.2f} (-$35)\n"
-                f"Trailing: $20→$5, $40→$20, $60→$40...\n"
-                f"Ticket: `{result['ticket']}`",
-                parse_mode='Markdown'
+            result = self.connector.send_order(
+                symbol=self.symbol,
+                order_type=order_type,
+                volume=lot_size,
+                sl=sl_price,
+                tp=tp_price,
+                magic=self.magic_number,
+                comment=f"TG_{order_type}_BX"
             )
+
+            if result:
+                self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} TP: {tp_price:.2f} ($10) SL: {sl_price:.2f} (-$10)")
+                await update.message.reply_text(
+                    f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
+                    f"TP: {tp_price:.2f} ($10)\n"
+                    f"SL: {sl_price:.2f} (-$10)\n"
+                    f"Ticket: `{result['ticket']}`",
+                    parse_mode='Markdown'
+                )
+            else:
+                self.logger.error(f"Failed to execute {order_type} {lot_size}")
+                await update.message.reply_text(f"❌ Failed to execute {order_type} {lot_size}")
         else:
-            self.logger.error(f"Failed to execute {order_type} {lot_size}")
-            await update.message.reply_text(f"❌ Failed to execute {order_type} {lot_size}")
+            # b/s mode: trailing stop
+            sl_price = self._calculate_price_for_profit(order_type, lot_size, INITIAL_SL_DOLLARS)
+
+            result = self.connector.send_order(
+                symbol=self.symbol,
+                order_type=order_type,
+                volume=lot_size,
+                sl=sl_price,
+                magic=self.magic_number,
+                comment=f"TG_{order_type}"
+            )
+
+            if result:
+                # Track for trailing stop monitoring (start at level -1 = initial SL)
+                self.monitored_positions[result['ticket']] = {'current_level': -1}
+                self.logger.info(f"Order executed: {order_type} {lot_size} @ {result['price']} SL: {sl_price:.2f} (-$35)")
+                await update.message.reply_text(
+                    f"✅ *{order_type}* {lot_size} lots @ {result['price']:.2f}\n"
+                    f"SL: {sl_price:.2f} (-$35)\n"
+                    f"Trailing: $20→$5, $40→$20, $60→$40...\n"
+                    f"Ticket: `{result['ticket']}`",
+                    parse_mode='Markdown'
+                )
+            else:
+                self.logger.error(f"Failed to execute {order_type} {lot_size}")
+                await update.message.reply_text(f"❌ Failed to execute {order_type} {lot_size}")
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callbacks"""
